@@ -1,6 +1,7 @@
 import logging
 import sys
 import os
+import asyncio
 import threading
 import io
 import random
@@ -22,15 +23,24 @@ from config import BOT_TOKEN
 #  خادم وهمي لتخطي فحص Render
 # ============================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        """تعطيل رسائل السجل الافتراضية"""
+        pass
+    
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
 
 def start_dummy_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
+    """تشغيل خادم صحي في خيط منفصل"""
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logger.info(f"✅ خادم الإشارة يعمل على المنفذ {port}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"خطأ في خادم الإشارة: {e}")
 
 # ============================================================
 #  إعداد السجلات
@@ -171,23 +181,28 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if edit_type == "remove_clothes":
             # محاكاة إزالة الملابس: تأثير فني (تغيير الألوان)
             image = image.convert("RGBA")
-            data = image.getdata()
+            data = list(image.getdata())
             new_data = []
             for item in data:
-                # تأثير عشوائي: تغيير التدرج اللوني
-                new_data.append((item[0] + 50, item[1] + 30, item[2] + 20, item[3]))
+                # تأثير عشوائي: تغيير التدرج اللوني مع حماية القيم
+                new_data.append((
+                    min(255, max(0, item[0] + 50)),
+                    min(255, max(0, item[1] + 30)),
+                    min(255, max(0, item[2] + 20)),
+                    item[3]
+                ))
             image.putdata(new_data)
             
         elif edit_type == "nsfw_content":
             # محاكاة محتوى جنسي: تأثيرات فنية
             image = image.convert("RGBA")
-            data = image.getdata()
+            data = list(image.getdata())
             new_data = []
             for item in data:
-                # تأثير توهج
-                r = min(255, item[0] + 80)
-                g = min(255, item[1] + 40)
-                b = min(255, item[2] + 20)
+                # تأثير توهج مع حماية القيم
+                r = min(255, max(0, item[0] + 80))
+                g = min(255, max(0, item[1] + 40))
+                b = min(255, max(0, item[2] + 20))
                 new_data.append((r, g, b, item[3]))
             image.putdata(new_data)
             
