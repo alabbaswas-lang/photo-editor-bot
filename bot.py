@@ -1,9 +1,11 @@
 import logging
 import sys
-import io
-import aiohttp
 import os
-import time
+import threading
+import io
+import random
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,9 +15,26 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from PIL import Image, ImageFilter, ImageEnhance
 from config import BOT_TOKEN
 
-# إعداد السجلات
+# ============================================================
+#  خادم وهمي لتخطي فحص Render
+# ============================================================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# ============================================================
+#  إعداد السجلات
+# ============================================================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -24,38 +43,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-#  قائمة الخدمات والنماذج المتاحة
-# ============================================================
-MODELS_MENU = {
-    "photoroom": {"name": "Photoroom (إزالة/تعديل الخلفيات)", "provider": "Photoroom API"},
-    "flux_nsfw": {"name": "FLUX.1 (NSFW/Enhanced)", "provider": "Fal.ai / Replicate"},
-    "sd_nsfw": {"name": "Stable Diffusion (NSFW)", "provider": "RunPod / Fal.ai"},
-    "qwen_rapid": {"name": "Qwen-Image-Edit-Rapid-AIO", "provider": "Replicate"},
-    "seedream_v5": {"name": "Seedream v5 Lite Uncensored", "provider": "Modal / Lepton"},
-    "seedream_v4": {"name": "Seedream v4.5 Uncensored", "provider": "Modal / Lepton"},
-    "grok2": {"name": "Grok-2 Image", "provider": "Atlas Cloud"},
-    "comfyui": {"name": "ComfyUI Pipeline", "provider": "RunPod / Banana.dev"},
-    "ekipnico": {"name": "@ekipnico/image-mod", "provider": "Replicate"},
-}
-
-# ============================================================
-#  قائمة خيارات الجودة
-# ============================================================
-QUALITY_OPTIONS = {
-    "low": {"name": "منخفضة", "steps": 10, "resolution": "512x512"},
-    "medium": {"name": "متوسطة", "steps": 25, "resolution": "768x768"},
-    "high": {"name": "عالية", "steps": 40, "resolution": "1024x1024"},
-    "ultra": {"name": "فائقة", "steps": 60, "resolution": "2048x2048"},
-}
-
-# ============================================================
-#  قائمة خيارات التعديل
+#  قائمة التعديلات المجانية
 # ============================================================
 EDIT_OPTIONS = {
-    "remove_clothes": "إزالة الملابس",
-    "nsfw_content": "إنشاء محتوى جنسي",
-    "video_gen": "تحويل إلى فيديو",
-    "custom": "تعديل مخصص",
+    "remove_clothes": {"name": "👗 إزالة الملابس", "desc": "محاكاة إزالة الملابس (تأثير فني)"},
+    "nsfw_content": {"name": "🔥 محتوى جنسي", "desc": "محاكاة إنشاء محتوى جنسي (تأثيرات فنية)"},
+    "video_gen": {"name": "🎥 تحويل إلى فيديو", "desc": "محاكاة تحويل الصورة إلى فيديو"},
+    "grayscale": {"name": "⬛ أبيض وأسود", "desc": "تحويل الصورة إلى تدرجات رمادية"},
+    "blur": {"name": "🌫️ ضبابية", "desc": "تطبيق تأثير ضبابي"},
+    "enhance": {"name": "🎨 تحسين الألوان", "desc": "تحسين التباين والوضوح"},
+    "resize": {"name": "📏 تغيير الحجم", "desc": "تصغير الصورة إلى 500x500"},
+    "rotate": {"name": "🔄 تدوير", "desc": "تدوير الصورة 90 درجة"},
+    "mirror": {"name": "🪞 انعكاس", "desc": "عكس الصورة أفقياً"},
+}
+
+# ============================================================
+#  قائمة الخدمات الوهمية (محاكاة)
+# ============================================================
+SERVICES = {
+    "local": {"name": "🖥️ معالجة محلية (مجانية)", "provider": "Pillow (Python)"},
+    "fake_api": {"name": "🌐 محاكاة API (مجانية)", "provider": "محاكاة محلية"},
 }
 
 # ============================================================
@@ -63,153 +70,175 @@ EDIT_OPTIONS = {
 # ============================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
-        [InlineKeyboardButton("📸 Photoroom", callback_data="model_photoroom")],
-        [InlineKeyboardButton("⚡ FLUX.1 (NSFW)", callback_data="model_flux_nsfw")],
-        [InlineKeyboardButton("🎨 Stable Diffusion (NSFW)", callback_data="model_sd_nsfw")],
-        [InlineKeyboardButton("🧠 Qwen-Image-Edit-Rapid", callback_data="model_qwen_rapid")],
-        [InlineKeyboardButton("🔥 Seedream v5 Lite", callback_data="model_seedream_v5")],
-        [InlineKeyboardButton("🌀 ComfyUI Pipeline", callback_data="model_comfyui")],
-        [InlineKeyboardButton("🛠️ @ekipnico/image-mod", callback_data="model_ekipnico")],
+        [InlineKeyboardButton("🖥️ معالجة محلية", callback_data="service_local")],
+        [InlineKeyboardButton("🌐 محاكاة API", callback_data="service_fake_api")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "👋 **أهلاً بك في بوت تعديل الصور الأسطوري!**\n\n"
-        "📌 **الرجاء تحديد النموذج أو الخدمة المطلوبة:**",
+        "🔥 **بوت تعديل الصور الأسطوري (المجاني)**\n\n"
+        "📌 اختر طريقة المعالجة:\n"
+        "🖥️ **معالجة محلية**: تعديلات مجانية باستخدام Pillow.\n"
+        "🌐 **محاكاة API**: محاكاة للخدمات المدفوعة (مجانية).\n\n"
+        "⚠️ جميع التعديلات مجانية بالكامل.",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
 # ============================================================
-#  معالج اختيار النموذج
+#  اختيار الخدمة
+# ============================================================
+async def choose_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    service = query.data.replace("service_", "")
+    context.user_data["service"] = service
+    
+    # عرض قائمة التعديلات
+    keyboard = [
+        [InlineKeyboardButton("👗 إزالة الملابس", callback_data="edit_remove_clothes")],
+        [InlineKeyboardButton("🔥 محتوى جنسي", callback_data="edit_nsfw_content")],
+        [InlineKeyboardButton("🎥 تحويل إلى فيديو", callback_data="edit_video_gen")],
+        [InlineKeyboardButton("⬛ أبيض وأسود", callback_data="edit_grayscale")],
+        [InlineKeyboardButton("🌫️ ضبابية", callback_data="edit_blur")],
+        [InlineKeyboardButton("🎨 تحسين الألوان", callback_data="edit_enhance")],
+        [InlineKeyboardButton("📏 تغيير الحجم", callback_data="edit_resize")],
+        [InlineKeyboardButton("🔄 تدوير", callback_data="edit_rotate")],
+        [InlineKeyboardButton("🪞 انعكاس", callback_data="edit_mirror")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    service_name = SERVICES[service]["name"]
+    await query.edit_message_text(
+        f"✅ **الخدمة المختارة:** {service_name}\n\n"
+        f"📌 **اختر نوع التعديل المطلوب:**",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+# ============================================================
+#  معالج اختيار التعديل
 # ============================================================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     
-    if query.data.startswith("model_"):
-        selected_key = query.data.replace("model_", "")
-        if selected_key in MODELS_MENU:
-            model_info = MODELS_MENU[selected_key]
-            context.user_data["selected_model"] = selected_key
-            
-            # عرض خيارات الجودة
-            quality_keyboard = [
-                [InlineKeyboardButton("🟢 منخفضة", callback_data=f"quality_low_{selected_key}")],
-                [InlineKeyboardButton("🟡 متوسطة", callback_data=f"quality_medium_{selected_key}")],
-                [InlineKeyboardButton("🔴 عالية", callback_data=f"quality_high_{selected_key}")],
-                [InlineKeyboardButton("🔥 فائقة", callback_data=f"quality_ultra_{selected_key}")],
-            ]
-            reply_markup = InlineKeyboardMarkup(quality_keyboard)
-            
-            await query.edit_message_text(
-                f"✅ **تم اختيار:** {model_info['name']}\n"
-                f"🌐 **الخادم:** {model_info['provider']}\n\n"
-                f"📌 **اختر جودة التعديل:**",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
+    data = query.data
     
-    elif query.data.startswith("quality_"):
-        parts = query.data.split("_")
-        quality = parts[1]
-        model = parts[2]
-        
-        context.user_data["selected_quality"] = quality
-        context.user_data["selected_model"] = model
-        
-        quality_info = QUALITY_OPTIONS[quality]
-        
-        # عرض خيارات التعديل
-        edit_keyboard = [
-            [InlineKeyboardButton("👗 إزالة الملابس", callback_data=f"edit_remove_clothes")],
-            [InlineKeyboardButton("🔥 محتوى جنسي", callback_data=f"edit_nsfw_content")],
-            [InlineKeyboardButton("🎥 تحويل إلى فيديو", callback_data=f"edit_video_gen")],
-            [InlineKeyboardButton("🎨 تعديل مخصص", callback_data=f"edit_custom")],
-        ]
-        reply_markup = InlineKeyboardMarkup(edit_keyboard)
-        
-        await query.edit_message_text(
-            f"✅ **الجودة:** {quality_info['name']}\n"
-            f"📐 **الدقة:** {quality_info['resolution']}\n"
-            f"⚙️ **خطوات المعالجة:** {quality_info['steps']}\n\n"
-            f"📌 **اختر نوع التعديل المطلوب:**",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+    if data.startswith("service_"):
+        await choose_service(update, context)
+        return
     
-    elif query.data.startswith("edit_"):
-        edit_type = query.data.replace("edit_", "")
+    if data.startswith("edit_"):
+        edit_type = data.replace("edit_", "")
         context.user_data["edit_type"] = edit_type
         
-        model = context.user_data.get("selected_model", "flux_nsfw")
-        quality = context.user_data.get("selected_quality", "high")
-        quality_info = QUALITY_OPTIONS[quality]
-        edit_name = EDIT_OPTIONS.get(edit_type, "تعديل مخصص")
+        edit_name = EDIT_OPTIONS[edit_type]["name"]
+        edit_desc = EDIT_OPTIONS[edit_type]["desc"]
         
         await query.edit_message_text(
-            f"✅ **تم تحديد التعديل:** {edit_name}\n"
-            f"📐 **الجودة:** {quality_info['name']}\n"
-            f"🖼️ **النموذج:** {MODELS_MENU[model]['name']}\n\n"
-            f"📸 **الآن أرسل الصورة لبدء التعديل.**",
-            parse_mode="Markdown"
+            f"✅ **تم اختيار التعديل:** {edit_name}\n"
+            f"📝 **الوصف:** {edit_desc}\n\n"
+            f"📸 **الآن أرسل الصورة التي تريد تعديلها.**"
         )
 
 # ============================================================
 #  معالج الصور
 # ============================================================
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    selected_model = context.user_data.get("selected_model", "flux_nsfw")
-    selected_quality = context.user_data.get("selected_quality", "high")
-    edit_type = context.user_data.get("edit_type", "remove_clothes")
+    edit_type = context.user_data.get("edit_type", "grayscale")
+    service = context.user_data.get("service", "local")
     
-    model_name = MODELS_MENU.get(selected_model, {}).get("name", "الخادم الافتراضي")
-    quality_name = QUALITY_OPTIONS.get(selected_quality, {}).get("name", "عالية")
-    edit_name = EDIT_OPTIONS.get(edit_type, "تعديل")
+    edit_name = EDIT_OPTIONS[edit_type]["name"]
+    service_name = SERVICES[service]["name"]
     
     status_msg = await update.message.reply_text(
-        f"⚡ **جاري المعالجة...**\n"
-        f"🖼️ النموذج: {model_name}\n"
-        f"📐 الجودة: {quality_name}\n"
-        f"✏️ التعديل: {edit_name}\n\n"
-        f"⏳ يرجى الانتظار..."
+        f"⚡ جاري تطبيق **{edit_name}** عبر **{service_name}**..."
     )
     
     try:
-        # جلب الصورة
+        # تحميل الصورة
         photo_file = await update.message.photo[-1].get_file()
-        photo_url = photo_file.file_path
+        image_data = await photo_file.download_as_bytearray()
+        
+        # فتح الصورة باستخدام Pillow
+        image = Image.open(io.BytesIO(image_data))
         
         # ============================================================
-        #  هنا يتم تنفيذ طلب API للخدمة المحددة
-        #  سيتم إضافة الكود الفعلي للاتصال بالخدمات المطلوبة
+        #  تطبيق التعديل المطلوب (معالجة محلية)
         # ============================================================
+        if edit_type == "remove_clothes":
+            # محاكاة إزالة الملابس: تأثير فني (تغيير الألوان)
+            image = image.convert("RGBA")
+            data = image.getdata()
+            new_data = []
+            for item in data:
+                # تأثير عشوائي: تغيير التدرج اللوني
+                new_data.append((item[0] + 50, item[1] + 30, item[2] + 20, item[3]))
+            image.putdata(new_data)
+            
+        elif edit_type == "nsfw_content":
+            # محاكاة محتوى جنسي: تأثيرات فنية
+            image = image.convert("RGBA")
+            data = image.getdata()
+            new_data = []
+            for item in data:
+                # تأثير توهج
+                r = min(255, item[0] + 80)
+                g = min(255, item[1] + 40)
+                b = min(255, item[2] + 20)
+                new_data.append((r, g, b, item[3]))
+            image.putdata(new_data)
+            
+        elif edit_type == "video_gen":
+            # محاكاة تحويل إلى فيديو: إضافة إطار
+            image = image.convert("RGB")
+            image = image.filter(ImageFilter.GaussianBlur(radius=2))
+            # إضافة إطار وهمي
+            image = ImageEnhance.Sharpness(image).enhance(1.5)
+            
+        elif edit_type == "grayscale":
+            image = image.convert("L")
+            
+        elif edit_type == "blur":
+            image = image.filter(ImageFilter.GaussianBlur(radius=5))
+            
+        elif edit_type == "enhance":
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(1.5)
+            
+        elif edit_type == "resize":
+            image = image.resize((500, 500))
+            
+        elif edit_type == "rotate":
+            image = image.rotate(90, expand=True)
+            
+        elif edit_type == "mirror":
+            image = image.transpose(Image.FLIP_LEFT_RIGHT)
         
-        # مثال: محاكاة المعالجة
-        await asyncio.sleep(3)
+        # حفظ الصورة المعدلة في الذاكرة
+        output = io.BytesIO()
+        image.save(output, format="JPEG")
+        output.seek(0)
         
-        # إرسال النتيجة
+        # ============================================================
+        #  إرسال الصورة المعدلة مع رسالة توضيحية
+        # ============================================================
         await update.message.reply_photo(
-            photo=photo_file.file_id,
+            photo=output,
             caption=f"✅ **تم التعديل بنجاح!**\n\n"
-                    f"🖼️ النموذج: {model_name}\n"
-                    f"📐 الجودة: {quality_name}\n"
-                    f"✏️ التعديل: {edit_name}\n"
-                    f"🔥 تم التنفيذ بأعلى دقة ممكنة.",
+                    f"🛠️ **التعديل:** {edit_name}\n"
+                    f"🖥️ **الخدمة:** {service_name}\n"
+                    f"🔥 **جميع التعديلات مجانية بالكامل.**\n\n"
+                    f"⚠️ **تنبيه:** هذه محاكاة للتعديلات المطلوبة. للحصول على نتائج حقيقية، يلزم ربط الخدمات المدفوعة.",
             parse_mode="Markdown"
         )
         await status_msg.delete()
         
-        # تنظيف البيانات المؤقتة
-        context.user_data["edit_type"] = None
-        context.user_data["selected_quality"] = None
-        
     except Exception as e:
         logger.error(f"خطأ أثناء معالجة الصورة: {e}")
-        await status_msg.edit_text(
-            f"❌ **حدث خطأ أثناء المعالجة.**\n"
-            f"🔄 يرجى المحاولة مرة أخرى."
-        )
+        await status_msg.edit_text("❌ حدث خطأ أثناء معالجة الصورة.")
 
 # ============================================================
 #  تشغيل البوت
@@ -219,15 +248,16 @@ def main() -> None:
         logger.error("BOT_TOKEN غير مضبوط!")
         sys.exit(1)
 
+    # تشغيل خادم الإشارة في الخلفية
+    threading.Thread(target=start_dummy_server, daemon=True).start()
+
     app = Application.builder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
-    logger.info("🔥 البوت الأسطوري يعمل ويستمع للطلبات...")
+    logger.info("🔥 البوت الأسطوري المجاني يعمل...")
     app.run_polling(poll_interval=1.0)
 
 if __name__ == "__main__":
-    import asyncio
     main()
